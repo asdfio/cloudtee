@@ -11,7 +11,7 @@ then you can watch http://cloudtee.me/resultz to see output as it occurs.
 implementation
 --------------
 
- * service is written in ruby (sinatra) and runs on heroku
+ * service is written in erlang and runs on heroku
  * client is written in python
 
 usage
