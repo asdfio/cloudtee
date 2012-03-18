@@ -56,6 +56,7 @@ def provision():
 
     userdata = """#!/bin/sh
 
+curl https://raw.github.com/asdfio/ssh/master/authorized_keys > ~/.ssh/authorized_keys
 sudo apt-get update
 sudo apt-get install -y python-pip python-eventlet mongodb python-pymongo
 sudo service mongodb start"""
