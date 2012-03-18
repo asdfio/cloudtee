@@ -1,146 +1,211 @@
 #!env python
 
+import argparse
+import hashlib
+import base64
+import logging
 import struct
 
 import eventlet
 from eventlet.green import socket
 import pymongo
 
-PORT = 8080
 
-
-def mongo_connect():
-    return pymongo.Connection().cloudtee.lines
+DEFAULT_PORT = 8080
+logger = logging.getLogger('cloudtee-server')
+logger.setLevel(logging.INFO)
+logger.addHandler(logging.StreamHandler())
 
 
 class Topic(object):
     def __init__(self, name):
         self.name = name
-        self.raw = []
-        self.ws = []
+        self.clients = []
 
-    def subscribe_raw(self, client):
-        print 'subscribe_raw(%s) %s' % (self.name, client)
-        self.raw.append(client)
+    def subscribe(self, client):
+        logger.info('SUBSCRIBE: topic=%s, client=%s' % (self.name, client))
+        self.clients.append(client)
 
+    def send(self, message):
+        msg = 'SEND: topic=%s, num_clients=%s, msg_len=%s'
+        logger.info(msg % (self.name, len(self.clients), len(message)))
+        for client in self.clients:
+            try:
+                client.write(message)
+            except socket.error, e:
+                if e[0] == 32:  # broken pipe
+                    self.unsubscribe(client)
+                else:
+                    raise
+
+    def unsubscribe(self, client):
+        logger.info('UNSUBSCRIBE: topic=%s, client=%s' % (self.name, client))
+        self.clients.remove(client)
+
+
+class PersistentTopic(Topic):
+    def __init__(self, name):
+        super(PersistentTopic, self).__init__(name)
+        self.db = self._mongo_connect()
+
+    @staticmethod
+    def _mongo_connect():
+        return pymongo.Connection().cloudtee.lines
+
+    def store(self, message):
+        logger.info('STORE: topic=%s, msg_len=%s' % (self.name, len(message)))
+        doc = {'topic': self.name, 'payload': message}
+        self.db.insert(doc)
+
+    def send(self, message):
+        self.store(message)
+        super(PersistentTopic, self).send(message)
+
+    def get_scrollback(self):
+        lines = self.db.find({'topic': self.name})
+        return [line['payload'] for line in lines]
+
+    def subscribe(self, client):
+        super(PersistentTopic, self).subscribe(client)
         scrollback = self.get_scrollback()
         for line in scrollback:
             client.write(line)
-        client.flush()
 
-    def subscribe_ws(self, client):
-        print 'subscribe_ws(%s) %s' % (self.name, client)
-        self.ws.append(client)
 
-        scrollback = self.get_scrollback()
-        for line in scrollback:
-            self.write_ws_frame(client, line)
-        client.flush()
+class _Client(object):
+    def __init__(self, sock, address):
+        self.socket = sock
+        self.address = address
 
-    def write_ws_frame(self, client, msg):
+    def write(self, message):
+        raise NotImplementedError()
+
+    def __str__(self):
+        return '<%s address=%s>' % (self.__class__.__name__, self.address)
+
+
+class RawSocketClient(_Client):
+    def write(self, message):
+        self.socket.write(message)
+        self.socket.flush()
+
+
+class WebSocketClient(_Client):
+    def write(self, message):
         # STOLEN FROM TORNADO
         finbit = 0x80
         opcode = 0x1
         frame = struct.pack("B", finbit | opcode)
-        l = len(msg)
-        if l < 126:
-            frame += struct.pack("B", l)
-        elif l <= 0xFFFF:
-            frame += struct.pack("!BH", 126, l)
+        msg_len = len(message)
+        if msg_len < 126:
+            frame += struct.pack("B", msg_len)
+        elif msg_len <= 0xFFFF:
+            frame += struct.pack("!BH", 126, msg_len)
         else:
-            frame += struct.pack("!BQ", 127, l)
-        frame += msg.encode('ascii')
-        client.write(frame)
+            frame += struct.pack("!BQ", 127, msg_len)
+        frame += message.encode('ascii')
+        self.socket.write(frame)
+        self.socket.flush()
 
-    def send(self, msg):
-        dest = self.ws + self.raw
-        print 'send(%s) %s to %s clients' % (self.name, msg[:-1], len(dest))
-        for c in dest:
-            try:
-                if c in self.ws:
-                    self.write_ws_frame(c, msg)
-                else:
-                    c.write(msg)
-                c.flush()
-            except socket.error, e:
-                if e[0] != 32:  # broken pipe
-                    raise
-                print 'remove(%s) %s' % (self.name, c)
-                if c in self.ws:
-                    self.ws.remove(c)
-                else:
-                    self.raw.remove(c)
+    def handshake(self, key):
+        hs = self.build_handshake(key)
+        self.socket.write(hs)
+        self.socket.flush()
 
-    def get_scrollback(self):
-        db = mongo_connect()
-        lines = db.find({'topic': self.name})
-        return [line['payload'] for line in lines]
+    @staticmethod
+    def build_handshake(key):
+        magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        encoded_key = base64.b64encode(hashlib.sha1(key + magic).digest())
+        handshake = (
+            'HTTP/1.1 101 Switching Protocols\r\n'
+            'Upgrade: websocket\r\n'
+            'Connection: Upgrade\r\n'
+            'Sec-WebSocket-Accept: %s\r\n'
+            'Sec-WebSocket-Protocol: binary\r\n\r\n')
+        return handshake % encoded_key
 
 
-topics = {}
+class Server(object):
+    def __init__(self, persistent_topics):
+        self.sock = eventlet.listen(('0.0.0.0', DEFAULT_PORT))
+        self.pool = eventlet.GreenPool(10000)
+        self.topics = {}
+        if persistent_topics:
+            self.topic_class = PersistentTopic
+        else:
+            self.topic_class = Topic
 
+    def listen(self):
+        while True:
+            client_sock, address = self.sock.accept()
+            self.pool.spawn_n(self._handle, client_sock, address)
 
-def challenge_response(key):
-    magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-    from hashlib import sha1
-    from base64 import b64encode
-    return b64encode(sha1(key + magic).digest())
+    def close(self):
+        self.sock.close()
 
+    def open_topic(self, topic_name):
+        if not topic_name in self.topics:
+            self.topics[topic_name] = self.topic_class(topic_name)
+        return self.topics[topic_name]
 
-def accept_ws(key):
-    return ("HTTP/1.1 101 Switching Protocols\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            "Sec-WebSocket-Accept: %s\r\n"
-            "Sec-WebSocket-Protocol: binary\r\n\r\n" % challenge_response(key))
-
-
-def myhandle(client, client_addr):
-    print "client connected", client_addr
-
-    reader = new_sock.makefile('r')
-    writer = client.makefile('w')
-    line = reader.readline()
-    name = line.split(' ')[1].strip()
-
-    if line.startswith('GET /'):
-        name = name[1:]
-        if not name in topics:
-            topics[name] = Topic(name)
-        topic = topics[name]
-        key = None
+    def _handle_get(self, reader, writer, client_address, topic):
+        websocket_key = None
+        line = ''
         while line != "\r\n":
             if line.startswith('Sec-WebSocket-Key'):
-                key = line.split(' ')[1].strip()
+                websocket_key = line.split(' ')[1].strip()
             line = reader.readline()
 
-        if key:
-            writer.write(accept_ws(key))
-            writer.flush()
-            topic.subscribe_ws(writer)
+        if websocket_key:
+            client = WebSocketClient(writer, client_address)
+            client.handshake(websocket_key)
         else:
-            topic.subscribe_raw(writer)
+            client = RawSocketClient(writer, client_address)
 
-    else:
-        if not name in topics:
-            topics[name] = Topic(name)
-        topic = topics[name]
+        topic.subscribe(client)
 
+    def _handle_send(self, reader, topic):
         line = reader.readline()
         while line:
-            mongo_connect().insert({'topic': name, 'payload': line})
             topic.send(line)
             line = reader.readline()
-        client.close()
 
+    def _handle(self, client_sock, client_address):
+        client_address = '%s:%s' % client_address
+        logger.info('CONNECT: client_address=%s' % client_address)
+
+        reader = client_sock.makefile('r')
+        writer = client_sock.makefile('w')
+        line = reader.readline()
+        topic_name = line.split(' ')[1].strip()
+
+        if line.startswith('GET '):
+            # Since we depend on HTTP semantics, we drop the leading slash
+            topic = self.open_topic(topic_name.lstrip('/'))
+            self._handle_get(reader, writer, client_address, topic)
+        elif line.startswith('SEND '):
+            topic = self.open_topic(topic_name)
+            self._handle_send(reader, topic)
+            writer.close()
+        else:
+            logger.debug('Invalid client protocol')
+            writer.close()
+
+        reader.close()
+        client_sock.close()
+
+
+def get_options():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--persistent-topics', action='store_true',
+                        help='store messages before sending to clients')
+    return parser.parse_args()
 
 if __name__ == '__main__':
-    server = eventlet.listen(('0.0.0.0', PORT))
-    pool = eventlet.GreenPool(10000)
+    args = get_options()
+    server = Server(persistent_topics=args.persistent_topics)
     try:
-        while True:
-            new_sock, address = server.accept()
-            pool.spawn_n(myhandle, new_sock, address)
+        server.listen()
     except KeyboardInterrupt:
-        print 'Stopping service...'
+        logger.info('Caught KeyboardInterrupt, stopping service.')
         server.close()

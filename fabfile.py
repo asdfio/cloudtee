@@ -101,7 +101,7 @@ def deploy():
 
 
 def start():
-    fabric.api.run('nohup bash -c "cloudtee-server &"')
+    fabric.api.run('nohup bash -c "cloudtee-server --persistent-topics &"')
 
 
 def stop():
