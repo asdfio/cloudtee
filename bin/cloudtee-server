@@ -191,18 +191,21 @@ class Server(object):
         return self.topics[topic_name]
 
     def _handle_get(self, reader, writer, client_address, topic):
-        websocket_key = None
-        line = ''
+        line = reader.readline()
+        headers = {}
         while line != "\r\n":
-            if line.startswith('Sec-WebSocket-Key'):
-                websocket_key = line.split(' ')[1].strip()
+            (key, value) = line[:-2].split(': ', 1)
+            headers[key.lower()] = value
             line = reader.readline()
+        print headers
 
-        formatter = build_message_formatter()
+        show_timestamp = headers.get('x-cloudtee-show-timestamp') != 'no'
+        show_client = headers.get('x-cloudtee-show-client') != 'no'
+        formatter = build_message_formatter(show_timestamp, show_client)
 
-        if websocket_key:
+        if 'sec-websocket-key' in headers:
             client = WebSocketClient(writer, client_address, formatter)
-            client.handshake(websocket_key)
+            client.handshake(headers['sec-websocket-key'])
         else:
             client = RawSocketClient(writer, client_address, formatter)
 
