@@ -40,6 +40,9 @@ def provision():
         sec_group = client.security_groups.create(sec_group_name,
                                                   sec_group_name)
         pg_id = sec_group.id
+        # for pinging
+        client.security_group_rules.create(pg_id, 'icmp', -1, -1,
+                                           '0.0.0.0/0')
         client.security_group_rules.create(pg_id, 'tcp', 22, 22,
                                            '0.0.0.0/0')
         client.security_group_rules.create(pg_id, 'tcp', 8080, 8080,
