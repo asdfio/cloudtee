@@ -11,10 +11,7 @@ from eventlet.green import socket
 import pymongo
 
 
-DEFAULT_PORT = 8080
 logger = logging.getLogger('cloudtee-server')
-logger.setLevel(logging.INFO)
-logger.addHandler(logging.StreamHandler())
 
 
 class Topic(object):
@@ -28,7 +25,7 @@ class Topic(object):
 
     def send(self, message):
         msg = 'SEND: topic=%s, num_clients=%s, msg_len=%s'
-        logger.info(msg % (self.name, len(self.clients), len(message)))
+        logger.debug(msg % (self.name, len(self.clients), len(message)))
         for client in self.clients:
             try:
                 client.write(message)
@@ -53,7 +50,7 @@ class PersistentTopic(Topic):
         return pymongo.Connection().cloudtee.lines
 
     def store(self, message):
-        logger.info('STORE: topic=%s, msg_len=%s' % (self.name, len(message)))
+        logger.debug('STORE: topic=%s, msg_len=%s' % (self.name, len(message)))
         doc = {'topic': self.name, 'payload': message}
         self.db.insert(doc)
 
@@ -126,9 +123,9 @@ class WebSocketClient(_Client):
 
 
 class Server(object):
-    def __init__(self, persistent_topics):
-        self.sock = eventlet.listen(('0.0.0.0', DEFAULT_PORT))
-        self.pool = eventlet.GreenPool(10000)
+    def __init__(self, port, pool_size, persistent_topics):
+        self.sock = eventlet.listen(('0.0.0.0', port))
+        self.pool = eventlet.GreenPool(pool_size)
         self.topics = {}
         if persistent_topics:
             self.topic_class = PersistentTopic
@@ -199,11 +196,27 @@ def get_options():
     parser = argparse.ArgumentParser()
     parser.add_argument('--persistent-topics', action='store_true',
                         help='store messages before sending to clients')
+    parser.add_argument('--port', type=int, default=8080,
+                        help='local port to bind')
+    parser.add_argument('--pool-size', type=int, default=10000,
+                        help='size of connection pool')
+    parser.add_argument('--debug', action='store_true',
+                        help='elevate log output to include debug info')
     return parser.parse_args()
+
+
+def configure_logging(args):
+    level = logging.DEBUG if args.debug else logging.INFO
+    logger.setLevel(level)
+    logger.addHandler(logging.StreamHandler())
+
 
 if __name__ == '__main__':
     args = get_options()
-    server = Server(persistent_topics=args.persistent_topics)
+    configure_logging(args)
+
+    server = Server(args.port, args.pool_size, args.persistent_topics)
+
     try:
         server.listen()
     except KeyboardInterrupt:
