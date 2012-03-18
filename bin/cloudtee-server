@@ -23,9 +23,19 @@ class Topic(object):
         print 'subscribe_raw(%s) %s' % (self.name, client)
         self.raw.append(client)
 
+        scrollback = self.get_scrollback()
+        for line in scrollback:
+            client.write(line)
+        client.flush()
+
     def subscribe_ws(self, client):
         print 'subscribe_ws(%s) %s' % (self.name, client)
         self.ws.append(client)
+
+        scrollback = self.get_scrollback()
+        for line in scrollback:
+            self.write_ws_frame(client, line)
+        client.flush()
 
     def write_ws_frame(self, client, msg):
         # STOLEN FROM TORNADO
@@ -39,7 +49,7 @@ class Topic(object):
             frame += struct.pack("!BH", 126, l)
         else:
             frame += struct.pack("!BQ", 127, l)
-        frame += msg
+        frame += msg.encode('ascii')
         client.write(frame)
 
     def send(self, msg):
@@ -110,11 +120,6 @@ def myhandle(client, client_addr):
             topic.subscribe_ws(writer)
         else:
             topic.subscribe_raw(writer)
-
-        scrollback = topic.get_scrollback()
-        for line in scrollback:
-            writer.write(line)
-            writer.flush()
 
     else:
         if not name in topics:
