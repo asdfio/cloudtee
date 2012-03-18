@@ -1,10 +1,11 @@
 #!env python
 
 import argparse
-import hashlib
 import base64
+import hashlib
 import logging
 import struct
+import time
 
 import eventlet
 from eventlet.green import socket
@@ -25,7 +26,7 @@ class Topic(object):
 
     def send(self, message):
         msg = 'SEND: topic=%s, num_clients=%s, msg_len=%s'
-        logger.debug(msg % (self.name, len(self.clients), len(message)))
+        logger.debug(msg % (self.name, len(self.clients), len(message.payload)))
         for client in self.clients:
             try:
                 client.write(message)
@@ -47,11 +48,17 @@ class PersistentTopic(Topic):
 
     @staticmethod
     def _mongo_connect():
-        return pymongo.Connection().cloudtee.lines
+        return pymongo.Connection().cloudtee.messages
 
     def store(self, message):
-        logger.debug('STORE: topic=%s, msg_len=%s' % (self.name, len(message)))
-        doc = {'topic': self.name, 'payload': message}
+        msg ='STORE: topic=%s, msg_len=%s' % (self.name, len(message.payload))
+        logger.debug(msg)
+        doc = {
+            'topic': self.name, 
+            'payload': message.payload,
+            'timestamp': message.timestamp,
+            'client_address': message.client_address,
+        }
         self.db.insert(doc)
 
     def send(self, message):
@@ -59,8 +66,9 @@ class PersistentTopic(Topic):
         super(PersistentTopic, self).send(message)
 
     def get_scrollback(self):
-        lines = self.db.find({'topic': self.name})
-        return [line['payload'] for line in lines]
+        for doc in self.db.find({'topic': self.name}):
+            yield Message(doc['payload'], doc['client_address'], 
+                          timestamp=doc['timestamp'])
 
     def subscribe(self, client):
         super(PersistentTopic, self).subscribe(client)
@@ -70,9 +78,10 @@ class PersistentTopic(Topic):
 
 
 class _Client(object):
-    def __init__(self, sock, address):
+    def __init__(self, sock, address, formatter):
         self.socket = sock
         self.address = address
+        self.dumps = formatter
 
     def write(self, message):
         raise NotImplementedError()
@@ -83,24 +92,25 @@ class _Client(object):
 
 class RawSocketClient(_Client):
     def write(self, message):
-        self.socket.write(message)
+        self.socket.write(self.dumps(message))
         self.socket.flush()
 
 
 class WebSocketClient(_Client):
     def write(self, message):
+        _message = self.dumps(message)
         # STOLEN FROM TORNADO
         finbit = 0x80
         opcode = 0x1
         frame = struct.pack("B", finbit | opcode)
-        msg_len = len(message)
+        msg_len = len(_message)
         if msg_len < 126:
             frame += struct.pack("B", msg_len)
         elif msg_len <= 0xFFFF:
             frame += struct.pack("!BH", 126, msg_len)
         else:
             frame += struct.pack("!BQ", 127, msg_len)
-        frame += message.encode('ascii')
+        frame += _message.encode('ascii')
         self.socket.write(frame)
         self.socket.flush()
 
@@ -120,6 +130,38 @@ class WebSocketClient(_Client):
             'Sec-WebSocket-Accept: %s\r\n'
             'Sec-WebSocket-Protocol: binary\r\n\r\n')
         return handshake % encoded_key
+
+
+class Message(object):
+    def __init__(self, payload, client_address, timestamp=None):
+        self.payload = payload
+        self.client_address = client_address
+        self.timestamp = timestamp or time.time() 
+
+    def to_dict(self):
+        return {
+            'payload': self.payload,
+            'client_address': self.client_address,
+            'timestamp': self.timestamp,
+        }
+
+
+def build_message_formatter(show_timestamp=True, show_client_address=True):
+    fmt = ""
+    if show_timestamp:
+        fmt += "[%(timestamp)s]"
+    if show_client_address:
+        fmt += "[%(client_address)s]"
+    fmt += " %(payload)s"
+
+    def message_formatter(message):
+        message_dict = message.to_dict()
+        pretty_ts = time.strftime("%Y-%m-%dT%H:%M:%S", 
+                                  time.gmtime(message_dict['timestamp']))
+        message_dict['timestamp'] = pretty_ts
+        return fmt % message_dict
+
+    return message_formatter
 
 
 class Server(object):
@@ -156,20 +198,23 @@ class Server(object):
                 websocket_key = line.split(' ')[1].strip()
             line = reader.readline()
 
+        formatter = build_message_formatter()
+
         if websocket_key:
-            client = WebSocketClient(writer, client_address)
+            client = WebSocketClient(writer, client_address, formatter)
             client.handshake(websocket_key)
         else:
-            client = RawSocketClient(writer, client_address)
+            client = RawSocketClient(writer, client_address, formatter)
 
         topic.subscribe(client)
 
-    def _handle_send(self, reader, topic):
+    def _handle_send(self, reader, client_address, topic):
         line = reader.readline()
         while line:
-            topic.send(line)
+            message = Message(line, client_address)
+            topic.send(message)
             if self.firehose:
-                self.firehose.send(line)
+                self.firehose.send(message)
             line = reader.readline()
 
     def _handle(self, client_sock, client_address):
@@ -187,7 +232,7 @@ class Server(object):
             self._handle_get(reader, writer, client_address, topic)
         elif line.startswith('SEND '):
             topic = self.open_topic(topic_name)
-            self._handle_send(reader, topic)
+            self._handle_send(reader, client_address, topic)
             writer.close()
         else:
             logger.debug('Invalid client protocol')
