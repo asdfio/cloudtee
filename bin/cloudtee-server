@@ -123,7 +123,7 @@ class WebSocketClient(_Client):
 
 
 class Server(object):
-    def __init__(self, port, pool_size, persistent_topics):
+    def __init__(self, port, pool_size, persistent_topics, use_firehose):
         self.sock = eventlet.listen(('0.0.0.0', port))
         self.pool = eventlet.GreenPool(pool_size)
         self.topics = {}
@@ -131,6 +131,9 @@ class Server(object):
             self.topic_class = PersistentTopic
         else:
             self.topic_class = Topic
+
+        # The firehose is a topic that receives all messages
+        self.firehose = self.open_topic('firehose') if use_firehose else None
 
     def listen(self):
         while True:
@@ -165,6 +168,8 @@ class Server(object):
         line = reader.readline()
         while line:
             topic.send(line)
+            if self.firehose:
+                self.firehose.send(line)
             line = reader.readline()
 
     def _handle(self, client_sock, client_address):
@@ -202,6 +207,8 @@ def get_options():
                         help='size of connection pool')
     parser.add_argument('--debug', action='store_true',
                         help='elevate log output to include debug info')
+    parser.add_argument('--no-firehose', action='store_true',
+                        help='disable reserved firehose topic')
     return parser.parse_args()
 
 
@@ -215,7 +222,9 @@ if __name__ == '__main__':
     args = get_options()
     configure_logging(args)
 
-    server = Server(args.port, args.pool_size, args.persistent_topics)
+    use_firehose = not args.no_firehose
+    server = Server(args.port, args.pool_size, args.persistent_topics,
+                    use_firehose)
 
     try:
         server.listen()
