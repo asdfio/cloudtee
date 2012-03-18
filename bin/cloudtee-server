@@ -134,8 +134,13 @@ def myhandle(client, client_addr):
         client.close()
 
 
-server = eventlet.listen(('0.0.0.0', PORT))
-pool = eventlet.GreenPool(10000)
-while True:
-    new_sock, address = server.accept()
-    pool.spawn_n(myhandle, new_sock, address)
+if __name__ == '__main__':
+    server = eventlet.listen(('0.0.0.0', PORT))
+    pool = eventlet.GreenPool(10000)
+    try:
+        while True:
+            new_sock, address = server.accept()
+            pool.spawn_n(myhandle, new_sock, address)
+    except KeyboardInterrupt:
+        print 'Stopping service...'
+        server.close()
