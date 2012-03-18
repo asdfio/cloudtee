@@ -152,7 +152,10 @@ def build_message_formatter(show_timestamp=True, show_client_address=True):
         fmt += "[%(timestamp)s]"
     if show_client_address:
         fmt += "[%(client_address)s]"
-    fmt += " %(payload)s"
+    if fmt:
+        # pad payload if there is any leading information
+        fmt += " "
+    fmt += "%(payload)s"
 
     def message_formatter(message):
         message_dict = message.to_dict()
@@ -197,7 +200,6 @@ class Server(object):
             (key, value) = line[:-2].split(': ', 1)
             headers[key.lower()] = value
             line = reader.readline()
-        print headers
 
         show_timestamp = headers.get('x-cloudtee-show-timestamp') != 'no'
         show_client = headers.get('x-cloudtee-show-client') != 'no'
