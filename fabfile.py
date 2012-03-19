@@ -2,6 +2,8 @@ import os
 import sys
 
 import fabric.api
+import novaclient.exceptions
+import novaclient.client
 
 
 fabric.api.env.user = os.environ.get('CT_USER', 'ubuntu')
@@ -34,20 +36,35 @@ def dnsimple_req(method, path, body=None):
     response = conn.getresponse()
     return json.loads(response.read())
 
-def record_for_subdomain(subdomain):
+
+def nova_client():
+    """create a new nova client"""
+    user = os.environ.get('OS_USERNAME')
+    password = os.environ.get('OS_PASSWORD')
+    tenant = os.environ.get('OS_TENANT_NAME')
+    auth_url = os.environ.get('OS_AUTH_URL')
+    client = novaclient.client.Client('2', user, password, tenant, auth_url)
+    # FIXME(ja): why do I have to do this? (otherwise service_type is None)
+    client.client.service_type = 'compute'
+    return client
+
+
+
+def record_for_subdomain(subdomain, record_type='A'):
     """Gets the record for a given subdomain or None"""
 
     records = dnsimple_req('GET', 'records.json')
 
     for info in records:
-        if info['record']['name'] == subdomain:
+        if (info['record']['name'] == subdomain and
+            info['record']['record_type'] == record_type):
             return info['record']
 
 
 def dns(ip, subdomain, record_type='A', ttl=300):
     """creates or updates a subdomain record for a domain"""
 
-    record = record_for_subdomain(subdomain)
+    record = record_for_subdomain(subdomain, record_type)
 
     if record:
         if ip != record['content']:
@@ -75,21 +92,41 @@ def dns(ip, subdomain, record_type='A', ttl=300):
         print 'DNS: %s -> %s [created]' % (subdomain, ip)
 
 
-def provision():
-    import novaclient.client
-    import novaclient.exceptions
+def cloud_ip():
+    """Ensure we have an IP in DNS and in the cloud.
 
-    user = os.environ.get('OS_USERNAME')
-    password = os.environ.get('OS_PASSWORD')
-    tenant = os.environ.get('OS_TENANT_NAME')
-    auth_url = os.environ.get('OS_AUTH_URL')
+    if DNS has an IP, make sure our cloud has it.  Otherwise
+    allocate a new IP and update DNS.
+    """
+    record = record_for_subdomain(subdomain)
+
+    client = nova_client()
+    floating_ips = client.floating_ips.list()
+
+    if record:
+        for fip in floating_ips:
+            if fip.ip == record['content']:
+                print 'Cloud IP: %s [exists]' % fip.ip
+                return True
+        print 'Cloud IP: %s [Not found]' % record['content']
+
+    # create/use a new ip
+    # FIXME(ja): this logic doesn't work... we should probably find all
+    # subdomains in our domain that use the allocated IP and unset them.
+    # eg, how to deal with a complete reboot of the cloud...
+    fip = client.floating_ips.create()
+    print 'Cloud IP: %s [allocated]' % fip.ip
+    dns(fip.ip, subdomain)
+    return fip
+
+def provision():
+    client = nova_client()
 
     flavor_name = os.environ.get('CT_FLAVOR_NAME', 'm1.large')
     image_name = os.environ.get('CT_IMAGE_NAME',
                                 'oneiric-server-cloudimg-amd64')
     sec_group_name = os.environ.get('CT_SEC_GROUP_NAME', 'cloudtee')
 
-    client = novaclient.client.Client('2', user, password, tenant, auth_url)
     image = client.images.find(name=image_name)
     flavor = client.flavors.find(name=flavor_name)
 
@@ -107,14 +144,6 @@ def provision():
                                            '0.0.0.0/0')
         client.security_group_rules.create(pg_id, 'tcp', 8080, 8080,
                                            '0.0.0.0/0')
-
-    try:
-        floating_ip = client.floating_ips.find(instance_id=None)
-    except novaclient.exceptions.NotFound:
-        print 'Allocating new floating ip'
-        floating_ip = client.floating_ips.create()
-
-    dns(floating_ip.ip, 'cloudtee')
 
     userdata = """#!/bin/sh
 
@@ -137,8 +166,10 @@ sudo service mongodb start"""
             print 'Could not get fixed ip. Exiting...'
             sys.exit(1)
 
-    server.add_floating_ip(floating_ip)
-    print 'Success! Instance running at %s' % floating_ip.ip
+    fip = cloud_ip()
+    # FIXME(ja): add_floating_ip fails if ip already points at another server
+    server.add_floating_ip(fip)
+    print 'Success! Instance running at %s' % fip.ip
 
 
 def deploy():
