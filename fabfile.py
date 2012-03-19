@@ -14,6 +14,7 @@ app_name = 'cloudtee'
 subdomain = 'cloudtee'
 domain = os.environ.get('DOMAIN')
 
+
 def dnsimple_req(method, path, body=None):
     import httplib
     import json
@@ -47,7 +48,6 @@ def nova_client():
     # FIXME(ja): why do I have to do this? (otherwise service_type is None)
     client.client.service_type = 'compute'
     return client
-
 
 
 def record_for_subdomain(subdomain, record_type='A'):
@@ -118,6 +118,7 @@ def cloud_ip():
     print 'Cloud IP: %s [allocated]' % fip.ip
     dns(fip.ip, subdomain)
     return fip
+
 
 def provision():
     client = nova_client()
