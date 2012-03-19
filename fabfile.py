@@ -14,6 +14,8 @@ app_name = 'cloudtee'
 subdomain = 'cloudtee'
 domain = os.environ.get('DOMAIN')
 
+sec_group_name = os.environ.get('CT_SEC_GROUP_NAME', 'cloudtee')
+
 
 def dnsimple_req(method, path, body=None):
     import httplib
@@ -120,21 +122,13 @@ def cloud_ip():
     return fip
 
 
-def provision():
+def cloud_ports():
+    """ensure ports are open to cloud instances"""
     client = nova_client()
-
-    flavor_name = os.environ.get('CT_FLAVOR_NAME', 'm1.large')
-    image_name = os.environ.get('CT_IMAGE_NAME',
-                                'oneiric-server-cloudimg-amd64')
-    sec_group_name = os.environ.get('CT_SEC_GROUP_NAME', 'cloudtee')
-
-    image = client.images.find(name=image_name)
-    flavor = client.flavors.find(name=flavor_name)
-
     try:
         sec_group = client.security_groups.find(name=sec_group_name)
+        print "Cloud Ports: [exists]"
     except novaclient.exceptions.NotFound:
-        print 'Creating security group %s' % sec_group_name
         sec_group = client.security_groups.create(sec_group_name,
                                                   sec_group_name)
         pg_id = sec_group.id
@@ -145,6 +139,19 @@ def provision():
                                            '0.0.0.0/0')
         client.security_group_rules.create(pg_id, 'tcp', 8080, 8080,
                                            '0.0.0.0/0')
+        print 'Cloud Ports: %s [created]' % sec_group_name
+
+
+def provision():
+    client = nova_client()
+
+    image_name = os.environ.get('CT_IMAGE_NAME',
+                                'oneiric-server-cloudimg-amd64')
+    image = client.images.find(name=image_name)
+    flavor_name = os.environ.get('CT_FLAVOR_NAME', 'm1.large')
+    flavor = client.flavors.find(name=flavor_name)
+
+    cloud_ports()
 
     userdata = """#!/bin/sh
 
@@ -153,14 +160,15 @@ sudo apt-get update
 sudo apt-get install -y python-pip python-eventlet mongodb python-pymongo
 sudo service mongodb start"""
 
-    server = client.servers.create('cloudtee', image, flavor,
+    server = client.servers.create(app_name,
+                                   image,
+                                   flavor,
                                    userdata=userdata,
                                    security_groups=[sec_group_name])
-    server_id = server.id
 
     # Wait for instance to get fixed ip
     for i in xrange(60):
-        server = client.servers.get(server_id)
+        server = client.servers.get(server.id)
         if len(server.networks):
             break
         if i == 59:
