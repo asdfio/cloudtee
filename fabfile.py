@@ -7,6 +7,64 @@ import fabric.api
 fabric.api.env.user = os.environ.get('CT_USER', 'ubuntu')
 fabric.api.env.hosts = [os.environ.get('CT_HOST')]
 
+def dnsimple_req(method, path, body=None):
+    import httplib
+    import json
+    auth = os.environ.get('DNSIMPLE_AUTH')
+    domain = os.environ.get('DNSIMPLE_DOMAIN')
+
+    kwargs = {
+        'headers': {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'X-DNSimple-Token': auth,
+        },
+    }
+
+    if body:
+        kwargs['body'] = json.dumps(body)
+
+    conn = httplib.HTTPSConnection('dnsimple.com', '443')
+    base_path = '/domains/%s' % domain
+    conn.request(method, '%s/%s' % (base_path, path), **kwargs)
+    response = conn.getresponse()
+    return json.loads(response.read())
+
+def dns(record_type='A', subdomain='cloudtee', ip='8.8.8.8', ttl=300):
+    """creates or updates a subdomain record for a domain"""
+
+    records = dnsimple_req('GET', 'records.json')
+
+    record = None
+    for info in records:
+        if info['record']['name'] == subdomain:
+            record = info['record']
+
+    if record:
+        print 'found record'
+        if record['content'] != ip:
+            body = {
+                'record': {
+                    'content': ip,
+                }
+            }
+            dnsimple_req('PUT', 'records/%s.json' % record['id'], body)
+            print 'DNS: %s -> %s [updated; was %s]' % (subdomain,
+                                                       ip,
+                                                       record['content'])
+        else:
+            print 'DNS: %s -> %s [noop]' % (subdomain, ip)
+    else:
+        body = {
+            'record': {
+                'name': subdomain,
+                'ttl': ttl,
+                'content': ip,
+                'record_type': record_type,
+            }
+        }
+        dnsimple_req('POST', 'records.json', body)
+        print 'DNS: %s -> %s [created]' % (subdomain, ip)
 
 def provision():
     import novaclient.client
