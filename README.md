@@ -43,3 +43,24 @@ environment variable.
 
 `start` and `stop` also use CT\_HOST to manage the cloudtee-server process
 running on your remote server
+
+Client configuration
+====================
+We need trunk python-novaclient:
+
+    git clone https://github.com/rackspace/python-novaclient.git
+    cd python-novaclient
+    python setup.py develop
+
+Now configure cloudtee:
+
+    cd cloudtee
+    python setup.py develop
+
+On OSX you may need to add modify your path to get fab working:
+
+    export PATH=/usr/local/share/python:$PATH
+
+Now test your setup:
+
+    fab status
