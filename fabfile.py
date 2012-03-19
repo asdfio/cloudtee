@@ -8,11 +8,14 @@ fabric.api.env.user = os.environ.get('CT_USER', 'ubuntu')
 fabric.api.env.hosts = [os.environ.get('CT_HOST')]
 
 
+app_name = 'cloudtee'
+subdomain = 'cloudtee'
+domain = os.environ.get('DOMAIN')
+
 def dnsimple_req(method, path, body=None):
     import httplib
     import json
     auth = os.environ.get('DNSIMPLE_AUTH')
-    domain = os.environ.get('DNSIMPLE_DOMAIN')
 
     kwargs = {
         'headers': {
@@ -31,20 +34,23 @@ def dnsimple_req(method, path, body=None):
     response = conn.getresponse()
     return json.loads(response.read())
 
+def record_for_subdomain(subdomain):
+    """Gets the record for a given subdomain or None"""
+
+    records = dnsimple_req('GET', 'records.json')
+
+    for info in records:
+        if info['record']['name'] == subdomain:
+            return info['record']
+
 
 def dns(ip, subdomain, record_type='A', ttl=300):
     """creates or updates a subdomain record for a domain"""
 
-    records = dnsimple_req('GET', 'records.json')
-
-    record = None
-    for info in records:
-        if info['record']['name'] == subdomain:
-            record = info['record']
+    record = record_for_subdomain(subdomain)
 
     if record:
-        print 'found record'
-        if record['content'] != ip:
+        if ip != record['content']:
             body = {
                 'record': {
                     'content': ip,
@@ -162,3 +168,15 @@ def start():
 
 def stop():
     fabric.api.run('killall cloudtee-server')
+
+
+def status():
+    print 'APP:', app_name
+    print 'DNS:', '%s.%s' % (subdomain, domain)
+
+    record = record_for_subdomain(subdomain)
+    if record:
+        ip = record['content']
+    else:
+        ip = None
+    print 'IP:', ip
