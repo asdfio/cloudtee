@@ -7,6 +7,7 @@ import fabric.api
 fabric.api.env.user = os.environ.get('CT_USER', 'ubuntu')
 fabric.api.env.hosts = [os.environ.get('CT_HOST')]
 
+
 def dnsimple_req(method, path, body=None):
     import httplib
     import json
@@ -30,7 +31,8 @@ def dnsimple_req(method, path, body=None):
     response = conn.getresponse()
     return json.loads(response.read())
 
-def dns(record_type='A', subdomain='cloudtee', ip='8.8.8.8', ttl=300):
+
+def dns(ip, subdomain, record_type='A', ttl=300):
     """creates or updates a subdomain record for a domain"""
 
     records = dnsimple_req('GET', 'records.json')
@@ -66,6 +68,7 @@ def dns(record_type='A', subdomain='cloudtee', ip='8.8.8.8', ttl=300):
         dnsimple_req('POST', 'records.json', body)
         print 'DNS: %s -> %s [created]' % (subdomain, ip)
 
+
 def provision():
     import novaclient.client
     import novaclient.exceptions
@@ -74,22 +77,15 @@ def provision():
     password = os.environ.get('OS_PASSWORD')
     tenant = os.environ.get('OS_TENANT_NAME')
     auth_url = os.environ.get('OS_AUTH_URL')
+
     flavor_name = os.environ.get('CT_FLAVOR_NAME', 'm1.large')
     image_name = os.environ.get('CT_IMAGE_NAME',
                                 'oneiric-server-cloudimg-amd64')
-    key_name = os.environ.get('CT_KEY_NAME', 'cloudtee')
     sec_group_name = os.environ.get('CT_SEC_GROUP_NAME', 'cloudtee')
 
     client = novaclient.client.Client('2', user, password, tenant, auth_url)
     image = client.images.find(name=image_name)
     flavor = client.flavors.find(name=flavor_name)
-
-    try:
-        client.keypairs.find(name=key_name)
-    except novaclient.exceptions.NotFound:
-        print 'Importing keypair as %s' % key_name
-        key_data = open('%s/.ssh/id_rsa.pub' % os.environ.get('HOME')).read()
-        client.keypairs.create(key_name, public_key=key_data)
 
     try:
         sec_group = client.security_groups.find(name=sec_group_name)
@@ -112,6 +108,8 @@ def provision():
         print 'Allocating new floating ip'
         floating_ip = client.floating_ips.create()
 
+    dns(floating_ip.ip, 'cloudtee')
+
     userdata = """#!/bin/sh
 
 curl https://raw.github.com/asdfio/ssh/master/authorized_keys > ~/.ssh/authorized_keys
@@ -120,7 +118,6 @@ sudo apt-get install -y python-pip python-eventlet mongodb python-pymongo
 sudo service mongodb start"""
 
     server = client.servers.create('cloudtee', image, flavor,
-                                   key_name=key_name,
                                    userdata=userdata,
                                    security_groups=[sec_group_name])
     server_id = server.id
