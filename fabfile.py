@@ -52,9 +52,9 @@ def _nova_client():
     password = os.environ.get('OS_PASSWORD')
     tenant = os.environ.get('OS_TENANT_NAME')
     auth_url = os.environ.get('OS_AUTH_URL')
-    client = novaclient.client.Client('2', user, password, tenant, auth_url)
     # FIXME(ja): why do I have to do this? (otherwise service_type is None)
-    client.client.service_type = 'compute'
+    client = novaclient.client.Client('2', user, password, tenant, auth_url,
+                                      service_type='compute')
     return client
 
 
@@ -159,13 +159,12 @@ def _get_server():
 
 def cloud_server():
     """launch a server within the proper security context"""
-    client = _nova_client()
-
     server = _get_server()
     if server:
         print "Server: %s [exists]" % server.id
         return server
 
+    client = _nova_client()
     image_name = os.environ.get('CT_IMAGE_NAME',
                                 'oneiric-server-cloudimg-amd64')
     image = client.images.find(name=image_name)
