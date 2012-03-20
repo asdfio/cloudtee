@@ -12,7 +12,8 @@ fabric.api.env.hosts = [os.environ.get('CT_HOST')]
 BASE_USERDATA = """#!/bin/sh
 
 KEYS_URL=https://raw.github.com/asdfio/ssh/master/authorized_keys
-curl $KEYS_URL > ~/.ssh/authorized_keys
+# Append keys so as not to clobber injected keys
+curl $KEYS_URL >> ~/.ssh/authorized_keys
 chmod 600 ~/.ssh/authorized_keys
 sudo apt-get update
 %s
